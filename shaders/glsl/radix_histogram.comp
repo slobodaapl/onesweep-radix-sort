@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared uint hist[ONESWEEP_RADIX];
+
+void main() {
+  uint tile = gl_WorkGroupID.x;
+  uint lid = gl_LocalInvocationID.x;
+  uint segment = segment_for_tile(tile);
+  uint local_tile = tile - segment_tile_begin(segment);
+  uint global_index = segment_item_begin(segment) + local_tile * ONESWEEP_WORKGROUP_SIZE + lid;
+  uint segment_end = segment_item_end(segment);
+
+  if (lid < ONESWEEP_RADIX) {
+    hist[lid] = 0u;
+  }
+  barrier();
+
+  if (global_index < segment_end) {
+    uint d = digit_of(in_keys[global_index]);
+    atomicAdd(hist[d], 1u);
+  }
+  barrier();
+
+  if (lid < ONESWEEP_RADIX) {
+    uint c = hist[lid];
+    tile_counts[tile_digit_index(tile, lid)] = c;
+    if (c != 0u) {
+      atomicAdd(global_counts[segment_digit_index(segment, lid)], c);
+    }
+  }
+}

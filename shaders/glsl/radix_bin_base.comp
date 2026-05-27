@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+  uint segment = gl_WorkGroupID.x;
+  uint lid = gl_LocalInvocationID.x;
+
+  if (lid == 0u) {
+    uint acc = 0u;
+    for (uint d = 0u; d < ONESWEEP_RADIX; ++d) {
+      uint idx = segment_digit_index(segment, d);
+      uint c = global_counts[idx];
+      bin_bases[idx] = acc;
+      acc += c;
+    }
+  }
+}

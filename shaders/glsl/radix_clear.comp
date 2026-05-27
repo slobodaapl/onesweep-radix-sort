@@ -1,0 +1,30 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+  uint id = gl_GlobalInvocationID.x;
+  uint tile_state_count = pc.tile_count * ONESWEEP_RADIX;
+  uint scan_state_count = pc.scan_ring_tile_count * ONESWEEP_RADIX;
+  uint segment_state_count = pc.segment_count * ONESWEEP_RADIX;
+
+  if (id < tile_state_count) {
+    tile_counts[id] = 0u;
+  }
+
+  if (id < scan_state_count) {
+    scan_status[id] = 0u;
+    scan_prefix[id] = 0u;
+  }
+
+  if (id < segment_state_count) {
+    global_counts[id] = 0u;
+    bin_bases[id] = 0u;
+  }
+
+  if (id == 0u) {
+    scan_tail[0] = 0u;
+  }
+}

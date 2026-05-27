@@ -1,0 +1,128 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_NV_shader_subgroup_partitioned : require
+#include "common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared uint subgroup_counts[ONESWEEP_MAX_SUBGROUPS * ONESWEEP_RADIX];
+shared uint tile_prefix[ONESWEEP_RADIX];
+
+uint lookback_prefix(uint segment_tile_base, uint tile, uint digit) {
+  uint acc = 0u;
+  uint t = tile;
+  uint ring_floor = tile > scan_lookback_limit() ? tile - scan_lookback_limit() : 0u;
+  uint ring_stop = max(segment_tile_base, ring_floor);
+
+  while (t > ring_stop) {
+    --t;
+    uint idx = tile_digit_index(t, digit);
+    uint ring_idx = scan_ring_digit_index(t, digit);
+    uint status = atomicAdd(scan_status[ring_idx], 0u);
+
+    if (status == t + 1u) {
+      memoryBarrierBuffer();
+      acc += scan_prefix[ring_idx] + tile_counts[idx];
+      return acc;
+    }
+
+    acc += tile_counts[idx];
+  }
+
+  while (t > segment_tile_base) {
+    --t;
+    acc += tile_counts[tile_digit_index(t, digit)];
+  }
+
+  return acc;
+}
+
+void wait_for_ring_slot(uint tile) {
+  if (tile < pc.scan_ring_tile_count) {
+    return;
+  }
+
+  uint lookback_limit = scan_lookback_limit();
+  while ((atomicAdd(scan_tail[0], 0u) & ONESWEEP_TAIL_MASK) + pc.scan_ring_tile_count <=
+         tile + lookback_limit) {
+  }
+}
+
+void publish_tail(uint tile) {
+  while ((atomicAdd(scan_tail[0], 0u) & ONESWEEP_TAIL_MASK) != (tile & ONESWEEP_TAIL_MASK)) {
+  }
+  atomicAdd(scan_tail[0], 1u);
+}
+
+void main() {
+  uint tile = gl_WorkGroupID.x;
+  uint lid = gl_LocalInvocationID.x;
+  uint segment = segment_for_tile(tile);
+  uint segment_start = segment_item_begin(segment);
+  uint segment_end = segment_item_end(segment);
+  uint segment_tile_base = segment_tile_begin(segment);
+  uint local_tile = tile - segment_tile_base;
+  uint global_index = segment_start + local_tile * ONESWEEP_WORKGROUP_SIZE + lid;
+  bool valid = global_index < segment_end;
+
+  uint raw_key = valid ? in_keys[global_index] : 0u;
+  uint digit = valid ? digit_of(raw_key) : 0u;
+
+  if (lid == 0u) {
+    wait_for_ring_slot(tile);
+  }
+
+  barrier();
+
+  for (uint i = lid; i < ONESWEEP_MAX_SUBGROUPS * ONESWEEP_RADIX; i += ONESWEEP_WORKGROUP_SIZE) {
+    subgroup_counts[i] = 0u;
+  }
+
+  barrier();
+
+  uvec4 match_mask = subgroupPartitionNV(digit);
+  uvec4 valid_mask = subgroupBallot(valid);
+  match_mask &= valid_mask;
+
+  uint rank_in_subgroup = subgroupBallotExclusiveBitCount(match_mask);
+  if (valid && rank_in_subgroup == 0u) {
+    subgroup_counts[gl_SubgroupID * ONESWEEP_RADIX + digit] = subgroupBallotBitCount(match_mask);
+  }
+
+  barrier();
+
+  uint subgroup_prefix = 0u;
+  if (valid) {
+    for (uint sg = 0u; sg < gl_SubgroupID; ++sg) {
+      subgroup_prefix += subgroup_counts[sg * ONESWEEP_RADIX + digit];
+    }
+  }
+  uint local_rank = subgroup_prefix + rank_in_subgroup;
+
+  if (lid < ONESWEEP_RADIX) {
+    uint prefix = lookback_prefix(segment_tile_base, tile, lid);
+    uint ring_idx = scan_ring_digit_index(tile, lid);
+    tile_prefix[lid] = prefix;
+    scan_prefix[ring_idx] = prefix;
+    memoryBarrierBuffer();
+    atomicExchange(scan_status[ring_idx], tile + 1u);
+  }
+
+  barrier();
+
+  if (valid) {
+    uint dst = segment_start + bin_bases[segment_digit_index(segment, digit)] + tile_prefix[digit] + local_rank;
+    out_keys[dst] = raw_key;
+    if (pc.has_values != 0u) {
+      out_values[dst] = in_values[global_index];
+    }
+  }
+
+  barrier();
+
+  if (lid == 0u) {
+    publish_tail(tile);
+  }
+}
